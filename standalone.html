@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Testudo to ICS Converter</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 50px auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .container {
+      background: white;
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    h1 {
+      color: #dc143c;
+      margin-bottom: 10px;
+    }
+    textarea {
+      width: 100%;
+      height: 200px;
+      padding: 10px;
+      border: 2px solid #ddd;
+      border-radius: 4px;
+      font-family: monospace;
+      margin: 15px 0;
+    }
+    button {
+      background: #dc143c;
+      color: white;
+      padding: 12px 30px;
+      border: none;
+      border-radius: 4px;
+      font-size: 16px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    button:hover {
+      background: #b00;
+    }
+    .example {
+      background: #f9f9f9;
+      padding: 10px;
+      border-left: 4px solid #dc143c;
+      margin: 15px 0;
+      font-size: 14px;
+    }
+    #status {
+      margin-top: 15px;
+      padding: 10px;
+      border-radius: 4px;
+      display: none;
+    }
+    .success { background: #d4edda; color: #155724; }
+    .error { background: #f8d7da; color: #721c24; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>📅 UMD Schedule to ICS Converter</h1>
+    <p><strong>Backup/Standalone Tool</strong> - Use this if the extension has issues</p>
+    
+    <div class="example">
+      <strong>Format:</strong> Each line should be:<br>
+      <code>COURSE_CODE | TITLE | DAYS | TIME | LOCATION</code><br>
+      Example: <code>CMSC131 | Intro to CS | MWF | 10:00am-10:50am | IRB 0318</code>
+    </div>
+
+    <label><strong>Paste your schedule (one course per line):</strong></label>
+    <textarea id="scheduleInput" placeholder="CMSC131 | Intro to Computer Science | MWF | 10:00am-10:50am | IRB 0318
+MATH140 | Calculus I | TuTh | 2:00pm-3:15pm | MTH 0201
+ENGL101 | English | MWF | 1:00pm-1:50pm | TYD 1102"></textarea>
+
+    <label><strong>Semester:</strong></label>
+    <select id="semester">
+      <option value="Fall 2024">Fall 2024</option>
+      <option value="Spring 2025">Spring 2025</option>
+      <option value="Summer 2025">Summer 2025</option>
+      <option value="Fall 2025">Fall 2025</option>
+    </select>
+
+    <br><br>
+    <button onclick="convertToICS()">Generate ICS File</button>
+    
+    <div id="status"></div>
+  </div>
+
+  <script>
+    function convertToICS() {
+      const input = document.getElementById('scheduleInput').value;
+      const semester = document.getElementById('semester').value;
+      const status = document.getElementById('status');
+
+      if (!input.trim()) {
+        showStatus('Please enter your schedule!', 'error');
+        return;
+      }
+
+      try {
+        const courses = parseSchedule(input);
+        if (courses.length === 0) {
+          showStatus('No valid courses found. Check the format!', 'error');
+          return;
+        }
+
+        const ics = generateICS(courses, semester);
+        downloadICS(ics, semester);
+        showStatus(`✓ Successfully generated ICS for ${courses.length} courses!`, 'success');
+      } catch (error) {
+        showStatus(`✗ Error: ${error.message}`, 'error');
+      }
+    }
+
+    function parseSchedule(input) {
+      const lines = input.split('\n').filter(l => l.trim());
+      const courses = [];
+
+      lines.forEach(line => {
+        const parts = line.split('|').map(p => p.trim());
+        if (parts.length >= 4) {
+          courses.push({
+            code: parts[0],
+            title: parts[1] || parts[0],
+            days: parts[2],
+            time: parts[3],
+            location: parts[4] || 'TBA'
+          });
+        }
+      });
+
+      return courses;
+    }
+
+    function generateICS(courses, semester) {
+      const dates = getSemesterDates(semester);
+      
+      let ics = [
+        'BEGIN:VCALENDAR',
+        'VERSION:2.0',
+        'PRODID:-//UMD Schedule//EN',
+        'CALSCALE:GREGORIAN',
+        'X-WR-CALNAME:UMD Schedule ' + semester,
+        'X-WR-TIMEZONE:America/New_York',
+      ].join('\r\n');
+
+      courses.forEach(course => {
+        ics += '\r\n' + createEvent(course, dates);
+      });
+
+      ics += '\r\nEND:VCALENDAR';
+      return ics;
+    }
+
+    function createEvent(course, dates) {
+      const timeMatch = course.time.match(/(\d{1,2}):(\d{2})\s*(am|pm)?-(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+      if (!timeMatch) return '';
+
+      let startHour = parseInt(timeMatch[1]);
+      const startMin = timeMatch[2];
+      let endHour = parseInt(timeMatch[4]);
+      const endMin = timeMatch[5];
+      
+      if (timeMatch[3] && timeMatch[3].toLowerCase() === 'pm' && startHour !== 12) startHour += 12;
+      if (timeMatch[6] && timeMatch[6].toLowerCase() === 'pm' && endHour !== 12) endHour += 12;
+
+      const dayMap = { 'M': 'MO', 'Tu': 'TU', 'W': 'WE', 'Th': 'TH', 'F': 'FR' };
+      const days = [];
+      let i = 0;
+      while (i < course.days.length) {
+        if (course.days.substr(i, 2) === 'Th' || course.days.substr(i, 2) === 'Tu') {
+          days.push(dayMap[course.days.substr(i, 2)]);
+          i += 2;
+        } else {
+          days.push(dayMap[course.days[i]]);
+          i++;
+        }
+      }
+
+      const firstDay = findFirstDay(dates.start, days);
+      const dtstart = `${firstDay}T${startHour.toString().padStart(2,'0')}${startMin}00`;
+      const dtend = `${firstDay}T${endHour.toString().padStart(2,'0')}${endMin}00`;
+      const until = dates.end.replace(/-/g, '') + 'T235959';
+
+      return [
+        'BEGIN:VEVENT',
+        `UID:${course.code}-${Date.now()}@umd.edu`,
+        `DTSTART;TZID=America/New_York:${dtstart}`,
+        `DTEND;TZID=America/New_York:${dtend}`,
+        `RRULE:FREQ=WEEKLY;BYDAY=${days.join(',')};UNTIL=${until}`,
+        `SUMMARY:${course.code} - ${course.title}`,
+        `LOCATION:${course.location}`,
+        'END:VEVENT'
+      ].join('\r\n');
+    }
+
+    function getSemesterDates(semester) {
+      const year = semester.match(/\d{4}/)[0];
+      if (semester.includes('Fall')) return { start: `${year}0828`, end: `${year}1213` };
+      if (semester.includes('Spring')) return { start: `${year}0122`, end: `${year}0510` };
+      return { start: `${year}0603`, end: `${year}0809` };
+    }
+
+    function findFirstDay(startDate, daysOfWeek) {
+      const dayMap = { MO: 1, TU: 2, WE: 3, TH: 4, FR: 5 };
+      const targetDays = daysOfWeek.map(d => dayMap[d]).sort((a,b) => a-b);
+      
+      let date = new Date(
+        parseInt(startDate.substr(0,4)),
+        parseInt(startDate.substr(4,2)) - 1,
+        parseInt(startDate.substr(6,2))
+      );
+      
+      while (!targetDays.includes(date.getDay() === 0 ? 7 : date.getDay())) {
+        date.setDate(date.getDate() + 1);
+      }
+      
+      const y = date.getFullYear();
+      const m = (date.getMonth() + 1).toString().padStart(2, '0');
+      const d = date.getDate().toString().padStart(2, '0');
+      return `${y}${m}${d}`;
+    }
+
+    function downloadICS(content, semester) {
+      const blob = new Blob([content], { type: 'text/calendar' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `umd_schedule_${semester.replace(/\s+/g, '_')}.ics`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function showStatus(message, type) {
+      const status = document.getElementById('status');
+      status.textContent = message;
+      status.className = type;
+      status.style.display = 'block';
+    }
+  </script>
+</body>
+</html>

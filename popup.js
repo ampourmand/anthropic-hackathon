@@ -1,0 +1,250 @@
+document.getElementById('exportBtn').addEventListener('click', async () => {
+  const button = document.getElementById('exportBtn');
+  const status = document.getElementById('status');
+  
+  button.disabled = true;
+  button.textContent = 'Exporting...';
+  showStatus('Processing your schedule...', 'info');
+
+  try {
+    // Get the active tab
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    
+    // Check if we're on testudo
+    if (!tab.url.includes('testudo.umd.edu')) {
+      throw new Error('Please navigate to your Testudo schedule page first!');
+    }
+
+    // Execute the scraping script
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      function: scrapeSchedule
+    });
+
+    const scheduleData = results[0].result;
+    
+    if (!scheduleData || scheduleData.courses.length === 0) {
+      throw new Error('No schedule data found. Make sure you\'re on your schedule page!');
+    }
+
+    // Generate ICS file
+    const icsContent = generateICS(scheduleData);
+    
+    // Download the file
+    const blob = new Blob([icsContent], { type: 'text/calendar' });
+    const url = URL.createObjectURL(blob);
+    const filename = `umd_schedule_${scheduleData.semester.replace(/\s+/g, '_')}.ics`;
+    
+    await chrome.downloads.download({
+      url: url,
+      filename: filename,
+      saveAs: true
+    });
+
+    showStatus(`✓ Successfully exported ${scheduleData.courses.length} courses!`, 'success');
+    button.textContent = 'Export Complete!';
+    
+    setTimeout(() => {
+      button.disabled = false;
+      button.textContent = 'Export to Calendar (.ics)';
+    }, 2000);
+
+  } catch (error) {
+    showStatus(`✗ Error: ${error.message}`, 'error');
+    button.disabled = false;
+    button.textContent = 'Export to Calendar (.ics)';
+  }
+});
+
+function showStatus(message, type) {
+  const status = document.getElementById('status');
+  status.textContent = message;
+  status.className = type;
+  status.style.display = 'block';
+}
+
+// This function will be injected into the page
+function scrapeSchedule() {
+  const courses = [];
+  
+  // Try to find semester info
+  let semester = 'Fall 2024'; // Default
+  const semesterElement = document.querySelector('.course-table-header, .semester-info, h1');
+  if (semesterElement) {
+    const text = semesterElement.textContent;
+    const match = text.match(/(Spring|Summer|Fall|Winter)\s+\d{4}/i);
+    if (match) semester = match[0];
+  }
+
+  // Scrape course rows - adjust selectors based on actual Testudo HTML structure
+  // This is a generic approach that should work for most table-based schedules
+  const rows = document.querySelectorAll('tr.schedule-row, tr[class*="course"], table tr');
+  
+  rows.forEach(row => {
+    try {
+      // Look for course code (e.g., CMSC131)
+      const courseCodeEl = row.querySelector('td[class*="course"], .course-id, td:first-child');
+      if (!courseCodeEl) return;
+      
+      const courseCode = courseCodeEl.textContent.trim();
+      if (!courseCode || courseCode.length < 3) return;
+
+      // Extract course details
+      const cells = row.querySelectorAll('td');
+      if (cells.length < 3) return;
+
+      // Common patterns in schedule tables:
+      // Course Code | Section | Title | Days | Time | Location
+      let title = '', days = '', time = '', location = '', section = '';
+      
+      cells.forEach((cell, idx) => {
+        const text = cell.textContent.trim();
+        if (text.match(/^[A-Z]{4}\d{3}$/)) return; // Skip course code
+        if (text.match(/^\d{4}$/)) section = text; // Section number
+        if (text.match(/[MTWRF]/)) days = text; // Days like MWF
+        if (text.match(/\d{1,2}:\d{2}/)) time = text; // Time like 10:00am-10:50am
+        if (!title && text.length > 10 && !text.match(/[MTWRF]/) && !text.match(/\d{1,2}:\d{2}/)) {
+          title = text;
+        }
+        if (text.match(/\d{4}|Building|Hall/i) && text !== section) location = text;
+      });
+
+      if (courseCode && days && time) {
+        courses.push({
+          courseCode,
+          section,
+          title: title || courseCode,
+          days,
+          time,
+          location
+        });
+      }
+    } catch (e) {
+      console.error('Error parsing row:', e);
+    }
+  });
+
+  return { courses, semester };
+}
+
+function generateICS(scheduleData) {
+  const { courses, semester } = scheduleData;
+  
+  // Determine semester dates (adjust as needed)
+  const semesterDates = getSemesterDates(semester);
+  
+  let icsContent = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//UMD Testudo Exporter//EN',
+    'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH',
+    'X-WR-CALNAME:UMD Schedule ' + semester,
+    'X-WR-TIMEZONE:America/New_York'
+  ].join('\r\n');
+
+  courses.forEach(course => {
+    const events = createRecurringEvents(course, semesterDates);
+    icsContent += '\r\n' + events;
+  });
+
+  icsContent += '\r\nEND:VCALENDAR';
+  return icsContent;
+}
+
+function createRecurringEvents(course, semesterDates) {
+  const { courseCode, title, days, time, location, section } = course;
+  
+  // Parse time (e.g., "10:00am-10:50am")
+  const timeMatch = time.match(/(\d{1,2}):(\d{2})\s*(am|pm)?-(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+  if (!timeMatch) return '';
+
+  let startHour = parseInt(timeMatch[1]);
+  const startMin = timeMatch[2];
+  let endHour = parseInt(timeMatch[4]);
+  const endMin = timeMatch[5];
+  
+  if (timeMatch[3] && timeMatch[3].toLowerCase() === 'pm' && startHour !== 12) startHour += 12;
+  if (timeMatch[6] && timeMatch[6].toLowerCase() === 'pm' && endHour !== 12) endHour += 12;
+  if (timeMatch[3] && timeMatch[3].toLowerCase() === 'am' && startHour === 12) startHour = 0;
+  if (timeMatch[6] && timeMatch[6].toLowerCase() === 'am' && endHour === 12) endHour = 0;
+
+  // Convert days to RRULE format
+  const dayMap = { M: 'MO', T: 'TU', W: 'WE', Th: 'TH', R: 'TH', F: 'FR' };
+  const rruleDays = [];
+  
+  let i = 0;
+  while (i < days.length) {
+    if (i < days.length - 1 && days.substr(i, 2) === 'Th') {
+      rruleDays.push('TH');
+      i += 2;
+    } else {
+      const day = days[i];
+      if (dayMap[day]) rruleDays.push(dayMap[day]);
+      i++;
+    }
+  }
+
+  // Find first occurrence
+  const firstDay = findFirstDayOfWeek(semesterDates.start, rruleDays);
+  
+  const dtstart = `${firstDay}T${startHour.toString().padStart(2, '0')}${startMin}00`;
+  const dtend = `${firstDay}T${endHour.toString().padStart(2, '0')}${endMin}00`;
+  const until = semesterDates.end.replace(/-/g, '') + 'T235959';
+  
+  const summary = `${courseCode}${section ? ' (' + section + ')' : ''} - ${title}`;
+  const uid = `${courseCode}-${section}-${Date.now()}@testudo.umd.edu`;
+
+  return [
+    'BEGIN:VEVENT',
+    `UID:${uid}`,
+    `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').split('.')[0]}Z`,
+    `DTSTART;TZID=America/New_York:${dtstart}`,
+    `DTEND;TZID=America/New_York:${dtend}`,
+    `RRULE:FREQ=WEEKLY;BYDAY=${rruleDays.join(',')};UNTIL=${until}`,
+    `SUMMARY:${summary}`,
+    `LOCATION:${location || 'TBA'}`,
+    `DESCRIPTION:${courseCode} - ${title}`,
+    'END:VEVENT'
+  ].join('\r\n');
+}
+
+function getSemesterDates(semester) {
+  const year = semester.match(/\d{4}/)?.[0] || new Date().getFullYear();
+  
+  // Default semester dates (adjust for actual UMD calendar)
+  if (semester.includes('Fall')) {
+    return { start: `${year}0828`, end: `${year}1213` };
+  } else if (semester.includes('Spring')) {
+    return { start: `${year}0122`, end: `${year}0510` };
+  } else if (semester.includes('Summer')) {
+    return { start: `${year}0603`, end: `${year}0809` };
+  }
+  
+  // Default to current semester
+  return { start: `${year}0828`, end: `${year}1213` };
+}
+
+function findFirstDayOfWeek(startDate, daysOfWeek) {
+  // startDate format: YYYYMMDD
+  const year = parseInt(startDate.substr(0, 4));
+  const month = parseInt(startDate.substr(4, 2)) - 1;
+  const day = parseInt(startDate.substr(6, 2));
+  
+  const dayMap = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
+  const targetDays = daysOfWeek.map(d => dayMap[d]).sort((a, b) => a - b);
+  
+  let date = new Date(year, month, day);
+  const firstTargetDay = targetDays[0];
+  
+  // Find first occurrence of target day
+  while (date.getDay() !== firstTargetDay) {
+    date.setDate(date.getDate() + 1);
+  }
+  
+  const y = date.getFullYear();
+  const m = (date.getMonth() + 1).toString().padStart(2, '0');
+  const d = date.getDate().toString().padStart(2, '0');
+  
+  return `${y}${m}${d}`;
+}
