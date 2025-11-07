@@ -67,63 +67,82 @@ function showStatus(message, type) {
 function scrapeSchedule() {
   const courses = [];
   
-  // Try to find semester info
+  // Try to find semester info - Testudo Angular app
   let semester = 'Fall 2024'; // Default
-  const semesterElement = document.querySelector('.course-table-header, .semester-info, h1');
+  const semesterElement = document.querySelector('.course-table-header, .semester-info, h1, [class*="semester"], [class*="term"]');
   if (semesterElement) {
     const text = semesterElement.textContent;
     const match = text.match(/(Spring|Summer|Fall|Winter)\s+\d{4}/i);
     if (match) semester = match[0];
   }
 
-  // Scrape course rows - adjust selectors based on actual Testudo HTML structure
-  // This is a generic approach that should work for most table-based schedules
-  const rows = document.querySelectorAll('tr.schedule-row, tr[class*="course"], table tr');
+  // Testudo uses Angular with classes like "course-card", "ng-binding", etc.
+  // Look for course cards or activities
+  const courseCards = document.querySelectorAll('.course-card, [class*="course-card"], .course-section, [class*="course"]');
   
-  rows.forEach(row => {
+  console.log(`Found ${courseCards.length} potential course elements`);
+  
+  courseCards.forEach((card, index) => {
     try {
-      // Look for course code (e.g., CMSC131)
-      const courseCodeEl = row.querySelector('td[class*="course"], .course-id, td:first-child');
-      if (!courseCodeEl) return;
+      // Find course code (e.g., CMSC131)
+      const courseCodeEl = card.querySelector('.course-id, [class*="course-id"], .course-code, [class*="course-code"]');
+      let courseCode = courseCodeEl ? courseCodeEl.textContent.trim() : '';
       
-      const courseCode = courseCodeEl.textContent.trim();
-      if (!courseCode || courseCode.length < 3) return;
-
-      // Extract course details
-      const cells = row.querySelectorAll('td');
-      if (cells.length < 3) return;
-
-      // Common patterns in schedule tables:
-      // Course Code | Section | Title | Days | Time | Location
-      let title = '', days = '', time = '', location = '', section = '';
+      // Alternative: Look in text content
+      if (!courseCode) {
+        const allText = card.textContent;
+        const codeMatch = allText.match(/([A-Z]{4}\s*\d{3}[A-Z]?)/);
+        if (codeMatch) courseCode = codeMatch[1].replace(/\s+/g, '');
+      }
       
-      cells.forEach((cell, idx) => {
-        const text = cell.textContent.trim();
-        if (text.match(/^[A-Z]{4}\d{3}$/)) return; // Skip course code
-        if (text.match(/^\d{4}$/)) section = text; // Section number
-        if (text.match(/[MTWRF]/)) days = text; // Days like MWF
-        if (text.match(/\d{1,2}:\d{2}/)) time = text; // Time like 10:00am-10:50am
-        if (!title && text.length > 10 && !text.match(/[MTWRF]/) && !text.match(/\d{1,2}:\d{2}/)) {
-          title = text;
+      if (!courseCode || courseCode.length < 5) return;
+
+      // Find section number
+      const sectionEl = card.querySelector('.course-section-id, [class*="section"], .section-id');
+      const section = sectionEl ? sectionEl.textContent.trim() : '';
+
+      // Find course title
+      const titleEl = card.querySelector('.course-title, [class*="course-title"], .course-name, [class*="course-name"]');
+      const title = titleEl ? titleEl.textContent.trim() : courseCode;
+
+      // Find time info - matching your HTML structure
+      const timeElements = card.querySelectorAll('.course-card-activity--time, [class*="activity--time"], [class*="time"]');
+      
+      timeElements.forEach(timeEl => {
+        const timeText = timeEl.textContent.trim();
+        
+        // Parse format like "T 9:30am - 10:45am EST" or "MWF 10:00am-10:50am"
+        const timeMatch = timeText.match(/([MTWRF]+|Tu|Th|TuTh|MWF|MW|TuThF)\s+(\d{1,2}:\d{2}[ap]m)\s*-\s*(\d{1,2}:\d{2}[ap]m)/i);
+        
+        if (timeMatch) {
+          const days = timeMatch[1].trim();
+          const startTime = timeMatch[2];
+          const endTime = timeMatch[3];
+          const time = `${startTime}-${endTime}`;
+          
+          // Find location
+          const locationEl = card.querySelector('.course-card-activity--location, [class*="activity--location"], [class*="location"], [class*="building"]');
+          const location = locationEl ? locationEl.textContent.trim() : 'TBA';
+
+          console.log(`Parsed: ${courseCode} ${days} ${time} ${location}`);
+
+          courses.push({
+            courseCode,
+            section,
+            title,
+            days,
+            time,
+            location
+          });
         }
-        if (text.match(/\d{4}|Building|Hall/i) && text !== section) location = text;
       });
 
-      if (courseCode && days && time) {
-        courses.push({
-          courseCode,
-          section,
-          title: title || courseCode,
-          days,
-          time,
-          location
-        });
-      }
     } catch (e) {
-      console.error('Error parsing row:', e);
+      console.error('Error parsing course card:', e);
     }
   });
 
+  console.log(`Scraped ${courses.length} courses total`);
   return { courses, semester };
 }
 
@@ -170,19 +189,38 @@ function createRecurringEvents(course, semesterDates) {
   if (timeMatch[6] && timeMatch[6].toLowerCase() === 'am' && endHour === 12) endHour = 0;
 
   // Convert days to RRULE format
-  const dayMap = { M: 'MO', T: 'TU', W: 'WE', Th: 'TH', R: 'TH', F: 'FR' };
+  // Handle both single letters and combinations like "Tu", "Th", "TuTh", "MWF", etc.
+  const dayMap = { 
+    'M': 'MO', 
+    'T': 'TU',  // Single T = Tuesday
+    'W': 'WE', 
+    'Th': 'TH', 
+    'R': 'TH',  // R is often used for Thursday
+    'F': 'FR',
+    'Tu': 'TU', // Explicit Tuesday
+    'Sa': 'SA',
+    'Su': 'SU'
+  };
+  
   const rruleDays = [];
   
   let i = 0;
   while (i < days.length) {
-    if (i < days.length - 1 && days.substr(i, 2) === 'Th') {
-      rruleDays.push('TH');
-      i += 2;
-    } else {
-      const day = days[i];
-      if (dayMap[day]) rruleDays.push(dayMap[day]);
-      i++;
+    // Check for two-letter combinations first
+    if (i < days.length - 1) {
+      const twoChar = days.substr(i, 2);
+      if (dayMap[twoChar]) {
+        rruleDays.push(dayMap[twoChar]);
+        i += 2;
+        continue;
+      }
     }
+    // Then check single character
+    const oneChar = days[i];
+    if (dayMap[oneChar]) {
+      rruleDays.push(dayMap[oneChar]);
+    }
+    i++;
   }
 
   // Find first occurrence

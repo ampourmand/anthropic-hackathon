@@ -5,7 +5,8 @@
   "description": "Export your UMD Testudo schedule to ICS format",
   "permissions": [
     "activeTab",
-    "downloads"
+    "downloads",
+    "scripting"
   ],
   "host_permissions": [
     "*://testudo.umd.edu/*"
