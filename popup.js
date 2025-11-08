@@ -18,7 +18,7 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
     // Execute the scraping script
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      function: scrapeSchedule
+      func: scrapeSchedule
     });
 
     const scheduleData = results[0].result;
@@ -30,16 +30,31 @@ document.getElementById('exportBtn').addEventListener('click', async () => {
     // Generate ICS file
     const icsContent = generateICS(scheduleData);
     
-    // Download the file
-    const blob = new Blob([icsContent], { type: 'text/calendar' });
-    const url = URL.createObjectURL(blob);
+    // Download the file - use data URI for better Firefox compatibility
     const filename = `umd_schedule_${scheduleData.semester.replace(/\s+/g, '_')}.ics`;
     
-    await chrome.downloads.download({
-      url: url,
-      filename: filename,
-      saveAs: true
-    });
+    // Create data URI
+    const dataUri = 'data:text/calendar;charset=utf-8,' + encodeURIComponent(icsContent);
+    
+    try {
+      await chrome.downloads.download({
+        url: dataUri,
+        filename: filename,
+        saveAs: true
+      });
+    } catch (downloadError) {
+      // Fallback for Firefox if downloads API fails
+      console.error('Downloads API failed, using fallback:', downloadError);
+      const blob = new Blob([icsContent], { type: 'text/calendar' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
 
     showStatus(`✓ Successfully exported ${scheduleData.courses.length} courses!`, 'success');
     button.textContent = 'Export Complete!';
@@ -65,14 +80,14 @@ function showStatus(message, type) {
 
 // This function will be injected into the page
 function scrapeSchedule() {
-  console.log('🔍 SCRAPE FUNCTION STARTED!');
-  console.log('Page URL:', window.location.href);
-  console.log('Page title:', document.title);
-  
   const courses = [];
+  const seen = new Set(); // Track unique course entries to avoid duplicates
+  
+  console.log('Starting schedule scrape...');
+  console.log('Current URL:', window.location.href);
   
   // Try to find semester info - Testudo Angular app
-  let semester = 'Fall 2025'; // Default
+  let semester = 'Spring 2025'; // Default to current semester
   const semesterElement = document.querySelector('.course-table-header, .semester-info, h1, [class*="semester"], [class*="term"]');
   if (semesterElement) {
     const text = semesterElement.textContent;
@@ -80,242 +95,166 @@ function scrapeSchedule() {
     if (match) semester = match[0];
   }
 
-  console.log('=== Starting Schedule Scrape ===');
-
-  // Try multiple selectors to find course cards with detailed logging
-  console.log('Trying selector: .course-card');
+  // Try multiple selector strategies
   let courseCards = document.querySelectorAll('.course-card');
-  console.log(`  Found: ${courseCards.length}`);
+  console.log(`Strategy 1 (.course-card): Found ${courseCards.length} elements`);
   
   if (courseCards.length === 0) {
-    console.log('Trying selector: [class*="course-card"]');
-    courseCards = document.querySelectorAll('[class*="course-card"]');
-    console.log(`  Found: ${courseCards.length}`);
+    // Try alternative selectors for course containers (not nested elements)
+    courseCards = document.querySelectorAll('.course-card-container');
+    console.log(`Strategy 2 (.course-card-container): Found ${courseCards.length} elements`);
   }
   
   if (courseCards.length === 0) {
-    console.log('Trying selector: [class*="course"]');
-    courseCards = document.querySelectorAll('[class*="course"]');
-    console.log(`  Found: ${courseCards.length}`);
+    // Try looking for divs that have course-card in class but not activity or other nested classes
+    courseCards = document.querySelectorAll('div[class*="course-card-container"]');
+    console.log(`Strategy 3 (div[class*="course-card-container"]): Found ${courseCards.length} elements`);
   }
 
-  // If still nothing, try to find any element with course code pattern
   if (courseCards.length === 0) {
-    console.log('Trying to find elements containing course codes...');
-    const allElements = document.querySelectorAll('*');
-    const candidateElements = [];
-    allElements.forEach(el => {
-      const text = el.textContent;
-      if (text.match(/[A-Z]{4}\s*\d{3}\s*\(\d{4}\)/)) {
-        candidateElements.push(el);
-      }
-    });
-    console.log(`  Found ${candidateElements.length} elements with course code pattern`);
-    
-    // Use parent elements if we found text nodes
-    if (candidateElements.length > 0) {
-      courseCards = candidateElements.map(el => {
-        // Go up a few levels to get the full course card
-        let parent = el;
-        for (let i = 0; i < 5; i++) {
-          if (parent.parentElement) parent = parent.parentElement;
-        }
-        return parent;
-      });
-      // Remove duplicates
-      courseCards = [...new Set(courseCards)];
-      console.log(`  Using ${courseCards.length} parent elements`);
-    }
+    console.error('No course cards found with any strategy');
+    console.log('Available classes on page:', Array.from(document.querySelectorAll('[class]')).map(el => el.className).slice(0, 20));
   }
   
-  console.log(`\n==> FINAL: Found ${courseCards.length} course card elements to process`);
-  
-  courseCards.forEach((card, cardIndex) => {
+  courseCards.forEach((card, index) => {
     try {
-      // Find course code (e.g., INST346)
-      const courseCodeEl = card.querySelector('.course-id, [class*="course-id"]');
-      let courseCode = '';
-      let section = '';
+      console.log(`Processing card ${index}:`, card.className);
       
-      if (courseCodeEl) {
-        const codeText = courseCodeEl.textContent.trim();
-        // Match patterns like "INST 346 (0303)" or "INST346 (0303)"
-        const fullMatch = codeText.match(/([A-Z]{4}\s*\d{3}[A-Z]?)\s*\((\d{4})\)/);
-        if (fullMatch) {
-          courseCode = fullMatch[1].replace(/\s+/g, '');
-          section = fullMatch[2];
-        } else {
-          // Try simpler match
-          const simpleMatch = codeText.match(/([A-Z]{4}\s*\d{3}[A-Z]?)/);
-          if (simpleMatch) courseCode = simpleMatch[1].replace(/\s+/g, '');
-        }
+      // Find course code (e.g., CMSC131) - try multiple strategies
+      let courseCodeEl = card.querySelector('.course-id');
+      let courseCode = courseCodeEl ? courseCodeEl.textContent.trim() : '';
+      
+      // Try alternative selectors
+      if (!courseCode) {
+        courseCodeEl = card.querySelector('[class*="course-id"], [class*="courseId"]');
+        courseCode = courseCodeEl ? courseCodeEl.textContent.trim() : '';
+      }
+      
+      // Last resort: Look in text content
+      if (!courseCode) {
+        const allText = card.textContent;
+        const codeMatch = allText.match(/([A-Z]{4}\s*\d{3}[A-Z]?)/);
+        if (codeMatch) courseCode = codeMatch[1].replace(/\s+/g, '');
       }
       
       if (!courseCode || courseCode.length < 5) {
-        console.log(`Card ${cardIndex}: No valid course code found`);
+        console.log(`Skipping card ${index}: no valid course code found`);
         return;
       }
 
-      console.log(`\n--- Card ${cardIndex}: ${courseCode} (${section}) ---`);
+      // Find section number
+      let sectionEl = card.querySelector('.course-section-id');
+      if (!sectionEl) sectionEl = card.querySelector('[class*="section"]');
+      const section = sectionEl ? sectionEl.textContent.trim() : '';
 
       // Find course title
-      const titleEl = card.querySelector('.course-title, [class*="course-title"]');
+      let titleEl = card.querySelector('.course-title');
+      if (!titleEl) titleEl = card.querySelector('[class*="course-title"], [class*="courseTitle"]');
       const title = titleEl ? titleEl.textContent.trim() : courseCode;
 
-      // Find ALL time elements (each represents a meeting: Lec, Dis, Lab, etc.)
-      // Use a broader search to catch all time entries
-      const timeElements = card.querySelectorAll('[class*="time"]');
+      // Find all activities within this course card - try multiple selectors
+      let activities = card.querySelectorAll('.course-card-activity');
+      if (activities.length === 0) {
+        activities = card.querySelectorAll('[class*="activity"]');
+      }
       
-      console.log(`  Found ${timeElements.length} time elements`);
+      console.log(`Course ${courseCode}: found ${activities.length} activities`);
       
-      let meetingCount = 0;
-      
-      timeElements.forEach((timeEl, timeIndex) => {
-        const timeText = timeEl.textContent.trim();
-        
-        console.log(`  Time ${timeIndex}: "${timeText}"`);
-        
-        // Skip if no actual time or if it's TBA
-        if (timeText.includes('TBA') || !timeText.match(/\d{1,2}:\d{2}/)) {
-          console.log(`    -> Skipped (TBA or no time)`);
-          return;
-        }
-        
-        // Parse format like "MW 10:00am - 10:50am EST"
-        const timeMatch = timeText.match(/([MTWRFSu]+|Tu|Th)\s+(\d{1,2}:\d{2}[ap]m)\s*-\s*(\d{1,2}:\d{2}[ap]m)/i);
+      // If no activities found, try to parse the card directly
+      if (activities.length === 0) {
+        console.log(`No activities found, trying to parse card directly`);
+        const cardText = card.textContent;
+        const timeMatch = cardText.match(/(TTh|TuTh|MW|MWF|WF|TuThF|Tu|Th|M|T|W|R|F)\s+(\d{1,2}:\d{2}\s*[ap]m)\s*-\s*(\d{1,2}:\d{2}\s*[ap]m)/i);
         
         if (timeMatch) {
-          const days = timeMatch[1].trim();
-          const startTime = timeMatch[2];
-          const endTime = timeMatch[3];
+          let days = timeMatch[1].trim();
+          const startTime = timeMatch[2].replace(/\s+/g, '');
+          const endTime = timeMatch[3].replace(/\s+/g, '');
+          
+          // Normalize day abbreviations
+          if (days === 'R') days = 'Th';
+          
           const time = `${startTime}-${endTime}`;
           
-          // Try to find activity type (Lec, Dis, etc.) by looking at siblings or parents
-          let activityType = '';
-          let currentEl = timeEl.parentElement;
-          let searchDepth = 0;
+          // Try to find location in card text
+          const locationMatch = cardText.match(/([A-Z]{3,}\s+\d{4}[A-Z]?)/); // Building + room number
+          const location = locationMatch ? locationMatch[1] : 'TBA';
+
+          const uniqueKey = `${courseCode}-${section}-${days}-${time}-${location}`;
           
-          // Search up the DOM tree for activity type
-          while (currentEl && searchDepth < 5) {
-            const text = currentEl.textContent;
-            // Look for activity type indicators
-            if (text.includes('Lec') && !activityType) activityType = 'Lec';
-            if (text.includes('Dis') && !activityType) activityType = 'Dis';
-            if (text.includes('Lab') && !activityType) activityType = 'Lab';
-            if (activityType) break;
-            currentEl = currentEl.parentElement;
-            searchDepth++;
+          if (!seen.has(uniqueKey)) {
+            seen.add(uniqueKey);
+            console.log(`Added (direct): ${courseCode} ${days} ${time} ${location}`);
+            
+            courses.push({
+              courseCode,
+              section,
+              title,
+              days,
+              time,
+              location
+            });
           }
+        }
+        return;
+      }
+      
+      activities.forEach(activity => {
+        // Get time from this specific activity - try multiple selectors
+        let timeEl = activity.querySelector('.course-card-activity--time');
+        if (!timeEl) timeEl = activity.querySelector('[class*="time"]');
+        if (!timeEl) return;
+        
+        const timeText = timeEl.textContent.trim();
+        console.log(`  Checking activity time text: "${timeText}"`);
+        
+        // Parse format like "Tu 9:30am - 10:45am EST" or "MWF 10:00am-10:50am" or "TTh 3:30pm-4:45pm"
+        // Match day patterns - order matters! Check longer patterns first (TTh, TuTh before single T)
+        const timeMatch = timeText.match(/(TTh|TuTh|MW|MWF|WF|TuThF|Tu|Th|M|T|W|R|F)\s+(\d{1,2}:\d{2}\s*[ap]m)\s*-\s*(\d{1,2}:\d{2}\s*[ap]m)/i);
+        
+        if (timeMatch) {
+          let days = timeMatch[1].trim();
+          const startTime = timeMatch[2].replace(/\s+/g, '');
+          const endTime = timeMatch[3].replace(/\s+/g, '');
           
-          // Find location - search siblings and parent elements
-          let location = 'TBA';
-          const locationEl = timeEl.parentElement?.querySelector('[class*="location"]');
-          if (locationEl) {
-            location = locationEl.textContent.trim();
+          // Normalize day abbreviations
+          // R is often used for Thursday in academic schedules
+          if (days === 'R') days = 'Th';
+          
+          const time = `${startTime}-${endTime}`;
+          
+          // Get location from this specific activity
+          let locationEl = activity.querySelector('.course-card-activity--location');
+          if (!locationEl) locationEl = activity.querySelector('[class*="location"]');
+          const location = locationEl ? locationEl.textContent.trim() : 'TBA';
+
+          // Create unique key to detect duplicates
+          const uniqueKey = `${courseCode}-${section}-${days}-${time}-${location}`;
+          
+          if (!seen.has(uniqueKey)) {
+            seen.add(uniqueKey);
+            console.log(`Added: ${courseCode} ${days} ${time} ${location}`);
+            
+            courses.push({
+              courseCode,
+              section,
+              title,
+              days,
+              time,
+              location
+            });
           } else {
-            // Try to find location in the same container
-            const container = timeEl.closest('.course-card-activity, [class*="activity"]');
-            if (container) {
-              const locEl = container.querySelector('[class*="location"]');
-              if (locEl) location = locEl.textContent.trim();
-            }
+            console.log(`Skipped duplicate: ${uniqueKey}`);
           }
-
-          // Create descriptive title
-          const fullTitle = activityType ? `${courseCode} ${activityType}` : courseCode;
-
-          console.log(`    ✓ ADDED: ${courseCode} ${activityType} ${days} ${time} @ ${location}`);
-
-          courses.push({
-            courseCode,
-            section,
-            title: fullTitle,
-            days,
-            time,
-            location,
-            activityType
-          });
-          
-          meetingCount++;
-        } else {
-          console.log(`    -> Could not parse time format`);
         }
       });
-      
-      console.log(`  Total meetings added for ${courseCode}: ${meetingCount}`);
 
     } catch (e) {
-      console.error(`Error parsing card ${cardIndex}:`, e);
+      console.error('Error parsing course card:', e);
     }
   });
 
-  // ALWAYS try text-based parsing as it's more reliable for Testudo
-  console.log('\n=== Trying text-based parsing of page content ===');
-  const pageText = document.body.innerText;
-  console.log('Page text length:', pageText.length);
-  console.log('First 500 chars:', pageText.substring(0, 500));
-  
-  const lines = pageText.split('\n');
-  console.log('Total lines:', lines.length);
-  
-  let currentCourse = null;
-  let currentActivity = null;
-  
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    
-    // Look for course code pattern: INST 335 (0301)
-    const courseMatch = line.match(/([A-Z]{4})\s+(\d{3}[A-Z]?)\s+\((\d{4})\)/);
-    if (courseMatch) {
-      currentCourse = {
-        code: courseMatch[1] + courseMatch[2],
-        section: courseMatch[3]
-      };
-      console.log(`✓ Found course: ${currentCourse.code} (${currentCourse.section})`);
-      continue;
-    }
-    
-    // Look for activity type
-    if (line.match(/^(Lec|Dis|Lab|Sem)$/)) {
-      currentActivity = line;
-      console.log(`  Activity type: ${currentActivity}`);
-      continue;
-    }
-    
-    // Look for time pattern: MW 9:00am - 9:50am EST or T 9:30am - 10:45am EST
-    const timeMatch = line.match(/^([MTWRFSu]+|Tu|Th)\s+(\d{1,2}:\d{2}[ap]m)\s*-\s*(\d{1,2}:\d{2}[ap]m)/i);
-    if (timeMatch && currentCourse) {
-      const days = timeMatch[1];
-      const startTime = timeMatch[2];
-      const endTime = timeMatch[3];
-      const time = `${startTime}-${endTime}`;
-      
-      // Next line is usually location
-      const nextLine = i + 1 < lines.length ? lines[i + 1].trim() : 'TBA';
-      let location = 'TBA';
-      
-      // Check if next line looks like a location (building code)
-      if (nextLine && !nextLine.match(/^(Lec|Dis|Lab|Sem|TBA|This section|Final|[A-Z]{4}\s+\d{3})/) && nextLine.length > 0) {
-        location = nextLine;
-      }
-      
-      console.log(`  ✓ ADDING: ${currentCourse.code} ${currentActivity || ''} ${days} ${time} @ ${location}`);
-      
-      courses.push({
-        courseCode: currentCourse.code,
-        section: currentCourse.section,
-        title: `${currentCourse.code} ${currentActivity || ''}`,
-        days,
-        time,
-        location,
-        activityType: currentActivity || ''
-      });
-    }
-  }
-  
-  console.log(`Text parsing found ${courses.length} meetings`);
-
-  console.log(`\n=== FINAL: Scraped ${courses.length} total meetings ===`);
+  console.log(`Scraped ${courses.length} unique courses total`);
   return { courses, semester };
 }
 
@@ -362,7 +301,7 @@ function createRecurringEvents(course, semesterDates) {
   if (timeMatch[6] && timeMatch[6].toLowerCase() === 'am' && endHour === 12) endHour = 0;
 
   // Convert days to RRULE format
-  // Handle both single letters and combinations like "Tu", "Th", "TuTh", "MWF", etc.
+  // Handle both single letters and combinations like "Tu", "Th", "TTh", "TuTh", "MWF", etc.
   const dayMap = { 
     'M': 'MO', 
     'T': 'TU',  // Single T = Tuesday
@@ -371,40 +310,53 @@ function createRecurringEvents(course, semesterDates) {
     'R': 'TH',  // R is often used for Thursday
     'F': 'FR',
     'Tu': 'TU', // Explicit Tuesday
+    'TTh': 'TU,TH', // Tuesday and Thursday
+    'TuTh': 'TU,TH', // Tuesday and Thursday
+    'MW': 'MO,WE', // Monday and Wednesday
+    'MWF': 'MO,WE,FR', // Monday, Wednesday, Friday
+    'WF': 'WE,FR', // Wednesday and Friday
     'Sa': 'SA',
     'Su': 'SU'
   };
   
-  const rruleDays = [];
+  let rruleDays = [];
   
-  let i = 0;
-  while (i < days.length) {
-    // Check for two-letter combinations first
-    if (i < days.length - 1) {
-      const twoChar = days.substr(i, 2);
-      if (dayMap[twoChar]) {
-        rruleDays.push(dayMap[twoChar]);
-        i += 2;
-        continue;
+  // First check for multi-day patterns (exact match)
+  if (dayMap[days]) {
+    rruleDays = dayMap[days].split(',');
+  } else {
+    // If not a predefined pattern, parse character by character
+    let i = 0;
+    while (i < days.length) {
+      // Check for two-letter combinations first
+      if (i < days.length - 1) {
+        const twoChar = days.substr(i, 2);
+        if (dayMap[twoChar]) {
+          rruleDays.push(dayMap[twoChar]);
+          i += 2;
+          continue;
+        }
       }
+      // Then check single character
+      const oneChar = days[i];
+      if (dayMap[oneChar]) {
+        rruleDays.push(dayMap[oneChar]);
+      }
+      i++;
     }
-    // Then check single character
-    const oneChar = days[i];
-    if (dayMap[oneChar]) {
-      rruleDays.push(dayMap[oneChar]);
-    }
-    i++;
   }
 
   // Find first occurrence
   const firstDay = findFirstDayOfWeek(semesterDates.start, rruleDays);
+  
+  console.log(`Creating ICS for ${courseCode} - Days: ${days} -> RRule: ${rruleDays.join(',')} -> FirstDay: ${firstDay}`);
   
   const dtstart = `${firstDay}T${startHour.toString().padStart(2, '0')}${startMin}00`;
   const dtend = `${firstDay}T${endHour.toString().padStart(2, '0')}${endMin}00`;
   const until = semesterDates.end.replace(/-/g, '') + 'T235959';
   
   const summary = `${courseCode}${section ? ' (' + section + ')' : ''} - ${title}`;
-  const uid = `${courseCode}-${section}-${Date.now()}@testudo.umd.edu`;
+  const uid = `${courseCode}-${section}-${Date.now()}-${Math.random()}@testudo.umd.edu`;
 
   return [
     'BEGIN:VEVENT',
@@ -423,17 +375,17 @@ function createRecurringEvents(course, semesterDates) {
 function getSemesterDates(semester) {
   const year = semester.match(/\d{4}/)?.[0] || new Date().getFullYear();
   
-  // Default semester dates (adjust for actual UMD calendar)
+  // UMD semester dates
   if (semester.includes('Fall')) {
     return { start: `${year}0828`, end: `${year}1213` };
   } else if (semester.includes('Spring')) {
-    return { start: `${year}0122`, end: `${year}0510` };
+    return { start: `${year}0122`, end: `${year}0515` };
   } else if (semester.includes('Summer')) {
     return { start: `${year}0603`, end: `${year}0809` };
   }
   
-  // Default to current semester
-  return { start: `${year}0828`, end: `${year}1213` };
+  // Default to current semester (Spring 2025)
+  return { start: `20250122`, end: `20250515` };
 }
 
 function findFirstDayOfWeek(startDate, daysOfWeek) {
@@ -443,10 +395,17 @@ function findFirstDayOfWeek(startDate, daysOfWeek) {
   const day = parseInt(startDate.substr(6, 2));
   
   const dayMap = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
-  const targetDays = daysOfWeek.map(d => dayMap[d]).sort((a, b) => a - b);
+  const targetDays = daysOfWeek.map(d => dayMap[d]).filter(d => d !== undefined).sort((a, b) => a - b);
+  
+  if (targetDays.length === 0) {
+    console.error('No valid target days found:', daysOfWeek);
+    return startDate; // Return start date as fallback
+  }
   
   let date = new Date(year, month, day);
   const firstTargetDay = targetDays[0];
+  
+  console.log(`Finding first ${firstTargetDay} (${Object.keys(dayMap).find(k => dayMap[k] === firstTargetDay)}) from ${startDate}`);
   
   // Find first occurrence of target day
   while (date.getDay() !== firstTargetDay) {
