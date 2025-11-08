@@ -65,6 +65,10 @@ function showStatus(message, type) {
 
 // This function will be injected into the page
 function scrapeSchedule() {
+  console.log('🔍 SCRAPE FUNCTION STARTED!');
+  console.log('Page URL:', window.location.href);
+  console.log('Page title:', document.title);
+  
   const courses = [];
   
   // Try to find semester info - Testudo Angular app
@@ -77,8 +81,6 @@ function scrapeSchedule() {
   }
 
   console.log('=== Starting Schedule Scrape ===');
-  console.log('Page URL:', window.location.href);
-  console.log('Page title:', document.title);
 
   // Try multiple selectors to find course cards with detailed logging
   console.log('Trying selector: .course-card');
@@ -247,63 +249,71 @@ function scrapeSchedule() {
     }
   });
 
-  // FALLBACK: If no courses found, try parsing the entire page text
-  if (courses.length === 0) {
-    console.log('\n!!! No courses found with DOM selectors, trying text-based parsing !!!');
-    const pageText = document.body.innerText;
-    const lines = pageText.split('\n');
+  // ALWAYS try text-based parsing as it's more reliable for Testudo
+  console.log('\n=== Trying text-based parsing of page content ===');
+  const pageText = document.body.innerText;
+  console.log('Page text length:', pageText.length);
+  console.log('First 500 chars:', pageText.substring(0, 500));
+  
+  const lines = pageText.split('\n');
+  console.log('Total lines:', lines.length);
+  
+  let currentCourse = null;
+  let currentActivity = null;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
     
-    let currentCourse = null;
-    let currentActivity = null;
-    
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-      
-      // Look for course code pattern: INST 335 (0301)
-      const courseMatch = line.match(/^([A-Z]{4})\s+(\d{3}[A-Z]?)\s+\((\d{4})\)/);
-      if (courseMatch) {
-        currentCourse = {
-          code: courseMatch[1] + courseMatch[2],
-          section: courseMatch[3]
-        };
-        console.log(`Found course: ${currentCourse.code} (${currentCourse.section})`);
-        continue;
-      }
-      
-      // Look for activity type
-      if (line.match(/^(Lec|Dis|Lab|Sem)$/)) {
-        currentActivity = line;
-        continue;
-      }
-      
-      // Look for time pattern: MW 9:00am - 9:50am EST
-      const timeMatch = line.match(/^([MTWRFSu]+|Tu|Th)\s+(\d{1,2}:\d{2}[ap]m)\s*-\s*(\d{1,2}:\d{2}[ap]m)/i);
-      if (timeMatch && currentCourse) {
-        const days = timeMatch[1];
-        const startTime = timeMatch[2];
-        const endTime = timeMatch[3];
-        const time = `${startTime}-${endTime}`;
-        
-        // Next line might be location
-        const nextLine = i + 1 < lines.length ? lines[i + 1].trim() : 'TBA';
-        const location = nextLine.match(/^[A-Z]/) ? nextLine : 'TBA';
-        
-        console.log(`  Adding: ${currentCourse.code} ${currentActivity} ${days} ${time} @ ${location}`);
-        
-        courses.push({
-          courseCode: currentCourse.code,
-          section: currentCourse.section,
-          title: `${currentCourse.code} ${currentActivity || ''}`,
-          days,
-          time,
-          location,
-          activityType: currentActivity || ''
-        });
-      }
+    // Look for course code pattern: INST 335 (0301)
+    const courseMatch = line.match(/([A-Z]{4})\s+(\d{3}[A-Z]?)\s+\((\d{4})\)/);
+    if (courseMatch) {
+      currentCourse = {
+        code: courseMatch[1] + courseMatch[2],
+        section: courseMatch[3]
+      };
+      console.log(`✓ Found course: ${currentCourse.code} (${currentCourse.section})`);
+      continue;
     }
     
-    console.log(`Fallback parsing found ${courses.length} meetings`);
+    // Look for activity type
+    if (line.match(/^(Lec|Dis|Lab|Sem)$/)) {
+      currentActivity = line;
+      console.log(`  Activity type: ${currentActivity}`);
+      continue;
+    }
+    
+    // Look for time pattern: MW 9:00am - 9:50am EST or T 9:30am - 10:45am EST
+    const timeMatch = line.match(/^([MTWRFSu]+|Tu|Th)\s+(\d{1,2}:\d{2}[ap]m)\s*-\s*(\d{1,2}:\d{2}[ap]m)/i);
+    if (timeMatch && currentCourse) {
+      const days = timeMatch[1];
+      const startTime = timeMatch[2];
+      const endTime = timeMatch[3];
+      const time = `${startTime}-${endTime}`;
+      
+      // Next line is usually location
+      const nextLine = i + 1 < lines.length ? lines[i + 1].trim() : 'TBA';
+      let location = 'TBA';
+      
+      // Check if next line looks like a location (building code)
+      if (nextLine && !nextLine.match(/^(Lec|Dis|Lab|Sem|TBA|This section|Final|[A-Z]{4}\s+\d{3})/) && nextLine.length > 0) {
+        location = nextLine;
+      }
+      
+      console.log(`  ✓ ADDING: ${currentCourse.code} ${currentActivity || ''} ${days} ${time} @ ${location}`);
+      
+      courses.push({
+        courseCode: currentCourse.code,
+        section: currentCourse.section,
+        title: `${currentCourse.code} ${currentActivity || ''}`,
+        days,
+        time,
+        location,
+        activityType: currentActivity || ''
+      });
+    }
   }
+  
+  console.log(`Text parsing found ${courses.length} meetings`);
 
   console.log(`\n=== FINAL: Scraped ${courses.length} total meetings ===`);
   return { courses, semester };
