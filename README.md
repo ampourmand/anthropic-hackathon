@@ -1,4 +1,4 @@
-# 📅 Testudo Schedule Exporter
+# 📅 TestudoSync
 
 A Chrome/Firefox browser extension to export your UMD Testudo schedule directly to ICS calendar format.
 
