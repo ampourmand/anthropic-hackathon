@@ -355,7 +355,10 @@ function createRecurringEvents(course, semesterDates) {
   const dtend = `${firstDay}T${endHour.toString().padStart(2, '0')}${endMin}00`;
   const until = semesterDates.end.replace(/-/g, '') + 'T235959';
   
-  const summary = `${courseCode}${section ? ' (' + section + ')' : ''} - ${title}`;
+  // Don't duplicate course code if title already contains it
+  const summary = title.includes(courseCode) 
+    ? `${title}${section ? ' (' + section + ')' : ''}` 
+    : `${courseCode}${section ? ' (' + section + ')' : ''} - ${title}`;
   const uid = `${courseCode}-${section}-${Date.now()}-${Math.random()}@testudo.umd.edu`;
 
   return [
